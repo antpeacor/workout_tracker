@@ -379,6 +379,15 @@ async function apiAppend(range, values) {
   return r.json();
 }
 
+async function apiUpdate(range, values) {
+  const r = await fetch(
+    `${API}/${SHEET_ID}/values/${encodeURIComponent(range)}?valueInputOption=RAW`,
+    {method:'PUT', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+     body: JSON.stringify({range, values})});
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
 // ── SYNC STATUS ───────────────────────────────────────────────────────────────
 function setSyncOk(m)   { _sync('ok',  m) }
 function setSyncErr(m)  { _sync('err', m) }
@@ -523,7 +532,7 @@ function renderExCard(name, container) {
         ${[1,2,3].map(i=>`
           <div class="set-wrap">
             <div class="set-n">Set ${i}</div>
-            <input class="set-in${v('s'+i)?' filled':''}" type="text" inputmode="decimal"
+            <input class="set-in${v('s'+i)?' filled':''}" type="text"
               id="si-${eid(name)}-${i}" value="${v('s'+i)}" placeholder="${ph(i)}"
               data-name="${esc(name)}" data-field="s${i}">
           </div>`).join('')}
@@ -572,11 +581,10 @@ function toggleCard(name) {
   }
 }
 
-// Auto-save when all 3 sets are filled
+// Auto-save when all 3 sets are filled (only if not yet saved)
 function checkAutoSave(name) {
   const st = exState[name] || {};
   if (st.s1 && st.s2 && st.s3 && !st.saved) {
-    // Don't auto-save immediately — wait 800ms in case user is still typing
     clearTimeout(st._autoTimer);
     st._autoTimer = setTimeout(() => {
       if (!exState[name].saved) saveEx(name, true);
@@ -584,37 +592,45 @@ function checkAutoSave(name) {
   }
 }
 
-// maybeAutoSave: save if has any data but wasn't saved yet
+// maybeAutoSave when switching away: save if unsaved data exists
 function maybeAutoSave(name) {
   const st = exState[name] || {};
-  if (!st.saved && (st.s1 || st.s2 || st.s3)) {
-    saveEx(name, true);
-  }
+  if (!st.saved && (st.s1 || st.s2 || st.s3)) saveEx(name, true);
 }
 
 async function saveEx(name, silent=false) {
   const st = exState[name] || {};
   const s1=(st.s1||'').trim(), s2=(st.s2||'').trim(), s3=(st.s3||'').trim();
-  if (!s1&&!s2&&!s3) {
-    if (!silent) alert('Enter at least one set.');
-    return;
-  }
-  if (st.saved) return; // already saved
+  if (!s1&&!s2&&!s3) { if (!silent) alert('Enter at least one set.'); return; }
 
-  if (!silent) setSyncBusy('Saving…');
+  setSyncBusy('Saving…');
   const today = new Date().toISOString().slice(0,10);
-  const row = [Date.now().toString(), today, curDay, name, s1, s2, s3, st.note||''];
+  const lc = name.toLowerCase();
+
+  // Find existing row for same exercise+day+date in sessionRows
+  const existingIdx = sessionRows.findIndex(r =>
+    r[1]===today && r[2]===curDay && r[3] && r[3].toLowerCase()===lc
+  );
+
+  const newRow = [
+    existingIdx>=0 ? sessionRows[existingIdx][0] : Date.now().toString(),
+    today, curDay, name, s1, s2, s3, st.note||''
+  ];
+
   try {
-    await apiAppend('sessions!A:H', [row]);
-    sessionRows.push(row);
-    exState[name] = {...st, saved:true, _autoTimer:undefined};
-    setSyncOk('Saved ✓');
-    // Re-render just this card
-    const old = document.getElementById('card-'+eid(name));
-    if (old) {
-      const newCard = renderExCard(name, null);
-      old.replaceWith(newCard);
+    if (existingIdx >= 0) {
+      // Overwrite: row index in sheet = existingIdx+2 (1 header + 1-based)
+      const sheetRow = existingIdx + 2;
+      await apiUpdate(`sessions!A${sheetRow}:H${sheetRow}`, [newRow]);
+      sessionRows[existingIdx] = newRow;
+    } else {
+      await apiAppend('sessions!A:H', [newRow]);
+      sessionRows.push(newRow);
     }
+    exState[name] = {...st, s1, s2, s3, saved:true, _autoTimer:undefined};
+    setSyncOk('Saved ✓');
+    const old = document.getElementById('card-'+eid(name));
+    if (old) old.replaceWith(renderExCard(name, null));
   } catch(e) {
     setSyncErr('Save failed: '+e.message);
   }
@@ -742,42 +758,70 @@ function buildNameMap() {
 }
 
 // Get all history entries for an exercise (case-insensitive, all days + sessions)
+// Returns [{date, s1, s2, s3, note, isPartial}] sorted by date
+// s1/s2/s3 are the parsed max kg for each set (null if not present)
 function getAllEntries(canonicalName) {
   const lc = canonicalName.toLowerCase();
-  const byDate = {}; // date -> {maxKg, minKg, isPartial, note}
+  const byDate = {}; // date -> {s1,s2,s3,note,isPartial}
 
-  // From history sheets (all 3 days)
+  function ensureDate(d) {
+    if (!byDate[d]) byDate[d] = {s1:null, s2:null, s3:null, note:'', isPartial:false};
+  }
+
+  // From history sheets — raw strings like "80-100-120", stored as one entry per session
+  // We don't know which is s1/s2/s3 from history, so split by dash for the 3 main values
   ['d1','d2','d3'].forEach(day => {
     Object.keys(histData[day]).forEach(name => {
       if (name.toLowerCase() !== lc) return;
       histData[day][name].forEach(h => {
-        const p = parseWeights(h.raw);
-        if (!p) return;
-        if (!byDate[h.date]) byDate[h.date] = {maxKg:0, minKg:Infinity, isPartial:false, note:''};
-        byDate[h.date].maxKg     = Math.max(byDate[h.date].maxKg, p.maxKg);
-        byDate[h.date].minKg     = Math.min(byDate[h.date].minKg, p.minKg);
-        byDate[h.date].isPartial = byDate[h.date].isPartial || p.isPartial;
+        ensureDate(h.date);
+        // Split raw into per-set parts by dash (top-level, not inside parens)
+        const parts = splitSets(h.raw);
+        parts.forEach((part, i) => {
+          if (i > 2) return;
+          const p = parseWeights(part);
+          if (p) {
+            const key = 's'+(i+1);
+            byDate[h.date][key] = p.maxKg;
+            if (p.isPartial) byDate[h.date].isPartial = true;
+          }
+        });
       });
     });
   });
 
-  // From saved sessions (include note)
+  // From saved sessions — s1, s2, s3 are separate columns
   sessionRows.forEach(r => {
     if (!r[3] || r[3].toLowerCase() !== lc) return;
-    const sets = [r[4],r[5],r[6]].map(v => parseWeights(v||'')).filter(Boolean);
     const d = r[1];
-    if (!byDate[d]) byDate[d] = {maxKg:0, minKg:Infinity, isPartial:false, note:''};
-    sets.forEach(p => {
-      byDate[d].maxKg     = Math.max(byDate[d].maxKg, p.maxKg);
-      byDate[d].minKg     = Math.min(byDate[d].minKg, p.minKg);
-      byDate[d].isPartial = byDate[d].isPartial || p.isPartial;
+    ensureDate(d);
+    [r[4],r[5],r[6]].forEach((v,i) => {
+      const p = parseWeights(v||'');
+      if (p) {
+        byDate[d]['s'+(i+1)] = p.maxKg;
+        if (p.isPartial) byDate[d].isPartial = true;
+      }
     });
     if (r[7] && r[7].trim())
-      byDate[d].note = byDate[d].note ? byDate[d].note + '; ' + r[7].trim() : r[7].trim();
+      byDate[d].note = byDate[d].note ? byDate[d].note+'; '+r[7].trim() : r[7].trim();
   });
 
-  const dates = Object.keys(byDate).sort();
-  return dates.map(d => ({date:d, ...byDate[d]}));
+  return Object.keys(byDate).sort().map(d => ({date:d, ...byDate[d]}));
+}
+
+// Split "80-100-120(6 at 130)" into ["80","100","120(6 at 130)"]
+// Splits on dashes that are NOT inside parentheses
+function splitSets(raw) {
+  const parts = [];
+  let depth = 0, cur = '';
+  for (const ch of raw) {
+    if (ch==='(') { depth++; cur+=ch; }
+    else if (ch===')') { depth--; cur+=ch; }
+    else if (ch==='-' && depth===0) { parts.push(cur.trim()); cur=''; }
+    else cur+=ch;
+  }
+  if (cur.trim()) parts.push(cur.trim());
+  return parts;
 }
 
 async function refreshData() {
@@ -866,64 +910,57 @@ function showGraph(exName) {
   document.getElementById('graph-list-view').style.display='none';
   document.getElementById('graph-detail').style.display='block';
   document.getElementById('gd-name').textContent = exName;
-  document.getElementById('gd-sub').textContent  = 'Solid point = full sets  ·  Hollow = attempted weight';
+  document.getElementById('gd-sub').textContent  = 'Per set · hollow point = attempted weight';
 
   const entries = getAllEntries(exName);
   const labels  = entries.map(e => fmtDate(e.date));
-  const maxVals = entries.map(e => e.maxKg);
-  const minVals = entries.map(e => e.minKg === Infinity ? null : e.minKg);
+
+  const s1vals = entries.map(e => e.s1);
+  const s2vals = entries.map(e => e.s2);
+  const s3vals = entries.map(e => e.s3);
+
+  const c1='#5bb8f5', c2='#c5f135', c3='#f56b8b';
+
+  function dataset(label, data, col) {
+    return {
+      label, data,
+      borderColor: col,
+      backgroundColor: 'transparent',
+      fill: false,
+      tension: .35,
+      pointRadius: 4,
+      pointBackgroundColor: entries.map((e,i) => (data[i]!==null && e.isPartial) ? 'transparent' : col),
+      pointBorderColor: col,
+      pointBorderWidth: 2,
+      spanGaps: true,
+    };
+  }
 
   if (chartInst) { chartInst.destroy(); chartInst=null; }
-  const col = '#c5f135';
 
   chartInst = new Chart(document.getElementById('main-chart').getContext('2d'), {
     type: 'line',
-    data: {
-      labels,
-      datasets: [
-        {
-          label: 'Max kg',
-          data: maxVals,
-          borderColor: col,
-          backgroundColor: col + '18',
-          fill: true,
-          tension: .35,
-          pointRadius: 5,
-          pointBackgroundColor: entries.map(e => e.isPartial ? 'transparent' : col),
-          pointBorderColor: col,
-          pointBorderWidth: 2,
-        },
-        {
-          label: 'Min kg',
-          data: minVals,
-          borderColor: col + '55',
-          backgroundColor: 'transparent',
-          fill: false,
-          tension: .35,
-          pointRadius: 3,
-          pointBackgroundColor: col + '55',
-          pointBorderColor: col + '55',
-          borderDash: [4,3],
-        }
-      ]
-    },
+    data: { labels, datasets: [
+      dataset('Set 1', s1vals, c1),
+      dataset('Set 2', s2vals, c2),
+      dataset('Set 3', s3vals, c3),
+    ]},
     options: {
       responsive: true, maintainAspectRatio: false,
       plugins: {
-        legend: { display: true, labels:{color:'#888',font:{size:11},boxWidth:20,padding:12} },
+        legend: { display:true, labels:{color:'#888',font:{size:11},boxWidth:16,padding:10} },
         tooltip: {
+          mode: 'index', intersect: false,
           callbacks: {
-            title: (items) => {
-              const i = items[0].dataIndex;
-              return fmtDate(entries[i].date);
-            },
+            title: (items) => fmtDate(entries[items[0].dataIndex].date),
             label: (c) => {
-              return c.dataset.label + ': ' + c.parsed.y + ' kg' +
-                (c.datasetIndex===0 && entries[c.dataIndex].isPartial ? ' ◌ partial' : '');
+              const v = c.parsed.y;
+              if (v===null||v===undefined) return null;
+              return c.dataset.label+': '+v+' kg'+(entries[c.dataIndex].isPartial?' ◌':'');
             },
             afterBody: (items) => {
               const note = entries[items[0].dataIndex].note;
-              return note ? ['', '📝 ' + note] : [];
+              return note ? ['','📝 '+note] : [];
             }
           }
         }
@@ -935,13 +972,14 @@ function showGraph(exName) {
     }
   });
 
-  const allMax = maxVals.filter(Boolean);
-  const allMin = minVals.filter(Boolean);
-  const prog = allMax.length>1 ? Math.round((allMax[allMax.length-1]-allMax[0])/allMax[0]*100) : null;
-  document.getElementById('st-max').textContent  = allMax.length ? Math.max(...allMax)+' kg' : '—';
-  document.getElementById('st-min').textContent  = allMin.length ? Math.min(...allMin)+' kg' : '—';
-  document.getElementById('st-sess').textContent = entries.length || '—';
-  document.getElementById('st-prog').textContent = prog!==null ? (prog>0?'+':'')+prog+'%' : '—';
+  const allVals = [...s1vals,...s2vals,...s3vals].filter(v=>v!==null);
+  const lastS3  = s3vals.filter(v=>v!==null);
+  const firstS3 = s3vals.find(v=>v!==null);
+  const prog = (lastS3.length>1&&firstS3) ? Math.round((lastS3[lastS3.length-1]-firstS3)/firstS3*100) : null;
+  document.getElementById('st-max').textContent  = allVals.length ? Math.max(...allVals)+' kg':'—';
+  document.getElementById('st-min').textContent  = allVals.length ? Math.min(...allVals)+' kg':'—';
+  document.getElementById('st-sess').textContent = entries.length||'—';
+  document.getElementById('st-prog').textContent = prog!==null?(prog>0?'+':'')+prog+'% (S3)':'—';
 }
 
 // ── NAV ───────────────────────────────────────────────────────────────────────
