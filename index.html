@@ -107,6 +107,12 @@ header{display:flex;align-items:center;justify-content:space-between;padding:18p
 /* ADD EXERCISE */
 .add-ex-btn{width:100%;padding:12px;border:1px dashed var(--b2);background:none;color:var(--t3);font-family:var(--mono);font-size:13px;border-radius:var(--r);cursor:pointer;margin-top:4px;transition:all .15s;display:flex;align-items:center;justify-content:center;gap:8px}
 .add-ex-btn:hover{border-color:var(--b3);color:var(--t2)}
+/* BINARY BUTTONS */
+.bin-btn{flex:1;padding:12px;border:1px solid var(--b2);background:var(--s2);color:var(--t2);font-family:var(--mono);font-size:14px;border-radius:8px;cursor:pointer;transition:all .15s}
+.bin-btn.bin-on{background:var(--ac2);border-color:var(--ac);color:var(--ac);font-weight:700}
+/* SET CONTROL */
+.set-ctrl-btn{padding:6px 14px;border:1px solid var(--b2);background:none;color:var(--t3);font-family:var(--mono);font-size:12px;border-radius:6px;cursor:pointer;transition:all .15s}
+.set-ctrl-btn:hover{border-color:var(--b3);color:var(--t2)}
 
 /* ADD SHEET (bottom sheet) */
 .sheet-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:150;display:flex;align-items:flex-end;justify-content:center}
@@ -150,6 +156,8 @@ header{display:flex;align-items:center;justify-content:space-between;padding:18p
 .modal-ex-sets{font-size:14px;color:var(--t1)}
 .modal-ex-note{font-size:11px;color:var(--t3);margin-top:2px}
 .load-btn{width:100%;margin-top:16px;padding:12px;border:1px solid var(--ac);background:var(--ac2);color:var(--ac);font-family:var(--sans);font-size:14px;font-weight:700;border-radius:8px;cursor:pointer}
+.del-ex-btn{background:none;border:none;color:var(--t3);cursor:pointer;font-size:15px;padding:4px;flex-shrink:0;line-height:1;margin-top:2px}
+.del-ex-btn:hover{color:#f56b8b}
 
 /* GRAPH */
 .search-in{width:100%;padding:10px 14px;font-family:var(--mono);font-size:13px;background:var(--s1);border:1px solid var(--b1);border-radius:var(--r);color:var(--t1);margin-bottom:12px}
@@ -388,6 +396,17 @@ async function apiUpdate(range, values) {
   return r.json();
 }
 
+async function apiClearRow(rowIndex) {
+  // rowIndex is 0-based index in sessionRows → sheet row = rowIndex + 2 (header + 1-based)
+  const sheetRow = rowIndex + 2;
+  const range = `sessions!A${sheetRow}:M${sheetRow}`;
+  const r = await fetch(
+    `${API}/${SHEET_ID}/values/${encodeURIComponent(range)}:clear`,
+    {method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}});
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
 // ── SYNC STATUS ───────────────────────────────────────────────────────────────
 function setSyncOk(m)   { _sync('ok',  m) }
 function setSyncErr(m)  { _sync('err', m) }
@@ -397,16 +416,29 @@ function _sync(s,m) {
   document.getElementById('sync-msg').textContent = m;
 }
 
+// ── EXERCISE CONFIG ───────────────────────────────────────────────────────────
+// Special exercise configs: defaultSets count, binary (yes/no instead of kg)
+const EX_CONFIG = {
+  'hip raise':     { defaultSets: 4 },
+  'hip raise(8x4)':{ defaultSets: 4 },
+  'ab finisher':   { binary: true },
+};
+function exConfig(name) {
+  return EX_CONFIG[name.toLowerCase().trim()] || {};
+}
+function defaultSetCount(name) { return exConfig(name).defaultSets || 3; }
+function isBinary(name)        { return !!exConfig(name).binary; }
+
 // ── LOAD ──────────────────────────────────────────────────────────────────────
 async function loadAll() {
   setSyncBusy('Loading…');
   try {
     const [r1,r2,r3,rs] = await Promise.all([
       apiGet('d1_history!A:C'), apiGet('d2_history!A:C'),
-      apiGet('d3_history!A:C'), apiGet('sessions!A:H')
+      apiGet('d3_history!A:C'), apiGet('sessions!A:M')  // A-M = up to 8 sets + note
     ]);
     histData = { d1: parseHist(r1), d2: parseHist(r2), d3: parseHist(r3) };
-    sessionRows = rs.slice(1);
+    sessionRows = rs.slice(1).filter(r => r && r[0] && r[3]); // skip empty/cleared rows
     restoreTodayState();
     setSyncOk('Synced');
     selDay(curDay);
@@ -415,17 +447,43 @@ async function loadAll() {
   } catch(e) { setSyncErr('Error: '+e.message); }
 }
 
-// Pre-fill exState from any sessions already saved today
+// Extract sets array from a session row (cols 4..N-1, last col is note)
+function rowSets(r) {
+  const extra = r.slice(4);
+  // Last non-empty string-like value is note; everything before is sets
+  let noteIdx = -1;
+  for (let i = extra.length-1; i >= 0; i--) {
+    const v = (extra[i]||'').trim();
+    if (!v) continue;
+    if (/^[\d\s\.\-\(\)at+x]+$/i.test(v)) break; // looks like a set value
+    noteIdx = i; break;
+  }
+  return (noteIdx>=0 ? extra.slice(0,noteIdx) : extra).map(v=>(v||'').trim()).filter(v=>v!=='');
+}
+
+function rowNote(r) {
+  const extra = r.slice(4);
+  for (let i = extra.length-1; i >= 0; i--) {
+    const v = (extra[i]||'').trim();
+    if (!v) continue;
+    if (!/^[\d\s\.\-\(\)at+x]+$/i.test(v)) return v;
+    break;
+  }
+  return '';
+}
+
+function rowToState(r) {
+  return { sets: rowSets(r), note: rowNote(r), saved: true };
+}
+
 function restoreTodayState() {
   const today = new Date().toISOString().slice(0,10);
   sessionRows.forEach(r => {
     if (r[1] !== today) return;
-    const name = r[3];
-    if (!name) return;
-    // Only restore if not already in state (don't overwrite live edits)
-    if (!exState[name]) {
-      exState[name] = { s1:r[4]||'', s2:r[5]||'', s3:r[6]||'', note:r[7]||'', saved:true };
-    }
+    const name = r[3]; if (!name) return;
+    if (exState[name]) return; // don't overwrite live edits
+    const state = rowToState(r);
+    exState[name] = state;
   });
 }
 
@@ -488,57 +546,82 @@ function renderLog() {
 
 function renderExCard(name, container) {
   const lc = name.toLowerCase();
-  // History: from histData for this day (case-insensitive match) + from sessions
+  const cfg = exConfig(name);
+  const binary = !!cfg.binary;
+
+  // Gather history entries
   const histEntries = [];
-  // from histData all days (show all, so recent includes cross-day)
   ['d1','d2','d3'].forEach(d => {
     Object.keys(histData[d]).forEach(k => {
       if (k.toLowerCase()===lc) histData[d][k].forEach(e => histEntries.push({date:e.date,raw:e.raw}));
     });
   });
-  // from sessionRows
   sessionRows.forEach(r => {
     if (r[3] && r[3].toLowerCase()===lc) {
-      const sets=[r[4],r[5],r[6]].filter(Boolean).join(' · ');
-      if (sets) histEntries.push({date:r[1], raw:sets});
+      const raw = rowSets(r).filter(Boolean).join(' · ');
+      if (raw) histEntries.push({date:r[1], raw});
     }
   });
   histEntries.sort((a,b)=>a.date.localeCompare(b.date));
-
   const last = histEntries.length ? histEntries[histEntries.length-1] : null;
-  const st = exState[name] || {};
-  const isOpen = openCard === name;
+
+  // State
+  if (!exState[name]) exState[name] = {};
+  const st = exState[name];
+  // Initialise sets array if not present
+  if (!st.sets) st.sets = Array(defaultSetCount(name)).fill('');
+  const isOpen  = openCard === name;
   const isSaved = !!st.saved;
-  const tmplSets = template && template.day===curDay && template.sets[name];
 
-  const card = document.createElement('div');
-  card.className = 'ex-card' + (isOpen?' open':'') + (isSaved?' saved':'');
-  card.id = 'card-' + eid(name);
-
-  // Preview: if saved today show sets, else last history
+  // Preview line
   let preview = '';
   if (isSaved) {
-    preview = [st.s1,st.s2,st.s3].filter(Boolean).join(' · ') + ' ✓';
+    if (binary) preview = st.sets[0] === 'yes' ? '✓ done' : '✗ skipped';
+    else preview = st.sets.filter(Boolean).join(' · ') + (st.sets.some(Boolean) ? ' ✓' : '');
   } else if (last) {
     preview = last.raw;
   } else {
     preview = 'No history yet';
   }
 
-  const tmplHint = tmplSets
-    ? `<div class="tmpl-banner">Template: <b>${[tmplSets.s1,tmplSets.s2,tmplSets.s3].filter(Boolean).join(' · ')}</b></div>`
-    : '';
-
   const recent = histEntries.slice(-4);
   const histHTML = recent.map(h =>
     `<div class="hist-row"><div class="hist-dot"></div><div class="hist-date">${fmtDate(h.date)}</div><div class="hist-raw">${h.raw}</div></div>`
   ).join('');
 
-  const v = (f) => st[f] || '';
-  const ph = (i) => tmplSets && tmplSets['s'+i] ? tmplSets['s'+i] : '—';
+  const card = document.createElement('div');
+  card.className = 'ex-card' + (isOpen?' open':'') + (isSaved?' saved':'');
+  card.id = 'card-' + eid(name);
+
+  // Build body HTML
+  let bodyHTML = '';
+  if (binary) {
+    const val = st.sets[0] || '';
+    bodyHTML = `
+      <div class="sets-lbl">Did you complete it?</div>
+      <div style="display:flex;gap:8px;margin-bottom:10px">
+        <button class="bin-btn${val==='yes'?' bin-on':''}" data-val="yes">Yes ✓</button>
+        <button class="bin-btn${val==='no'?' bin-on':''}" data-val="no">No ✗</button>
+      </div>`;
+  } else {
+    const setsHTML = st.sets.map((v,i) => `
+      <div class="set-wrap">
+        <div class="set-n">Set ${i+1}</div>
+        <input class="set-in${v?' filled':''}" type="text"
+          id="si-${eid(name)}-${i}" value="${esc(v)}" placeholder="—"
+          data-idx="${i}">
+      </div>`).join('');
+    bodyHTML = `
+      <div class="sets-lbl">Today's sets (kg)</div>
+      <div class="sets-g" id="sets-g-${eid(name)}">${setsHTML}</div>
+      <div style="display:flex;gap:6px;margin-bottom:10px">
+        <button class="set-ctrl-btn" data-action="add">+ set</button>
+        <button class="set-ctrl-btn" data-action="remove">− set</button>
+      </div>`;
+  }
 
   card.innerHTML = `
-    <div class="ex-hd" data-name="${esc(name)}">
+    <div class="ex-hd">
       <div class="ex-left">
         <div class="ex-nm">${name}</div>
         <div class="ex-pr">${preview}</div>
@@ -549,40 +632,58 @@ function renderExCard(name, container) {
       </div>
     </div>
     <div class="ex-bd">
-      ${tmplHint}
-      <div class="sets-lbl">Today's sets (kg)</div>
-      <div class="sets-g">
-        ${[1,2,3].map(i=>`
-          <div class="set-wrap">
-            <div class="set-n">Set ${i}</div>
-            <input class="set-in${v('s'+i)?' filled':''}" type="text"
-              id="si-${eid(name)}-${i}" value="${v('s'+i)}" placeholder="${ph(i)}"
-              data-name="${esc(name)}" data-field="s${i}">
-          </div>`).join('')}
-      </div>
+      ${bodyHTML}
       <textarea class="set-note" rows="1" placeholder="Note (optional)"
-        id="note-${eid(name)}" data-name="${esc(name)}" data-field="note">${v('note')}</textarea>
+        id="note-${eid(name)}">${st.note||''}</textarea>
       <div class="btn-row">
-        <button class="save-btn" data-name="${esc(name)}">Save ✓</button>
+        <button class="save-btn">Save ✓</button>
       </div>
       ${histHTML ? `<div class="hist-sec"><div class="hist-ttl">Recent</div>${histHTML}</div>` : ''}
     </div>`;
 
-  // Attach events via delegation on the card (avoids inline onclick issues)
+  // Events
   card.querySelector('.ex-hd').addEventListener('click', () => toggleCard(name));
-  card.querySelectorAll('.set-in').forEach(inp => {
-    inp.addEventListener('input', () => {
-      if (!exState[name]) exState[name] = {};
-      exState[name][inp.dataset.field] = inp.value;
-      inp.classList.toggle('filled', inp.value !== '');
-      checkAutoSave(name);
-    });
-  });
   card.querySelector('.set-note').addEventListener('input', e => {
     if (!exState[name]) exState[name] = {};
     exState[name].note = e.target.value;
   });
   card.querySelector('.save-btn').addEventListener('click', () => saveEx(name));
+
+  if (binary) {
+    card.querySelectorAll('.bin-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (!exState[name]) exState[name] = {};
+        exState[name].sets = [btn.dataset.val];
+        card.querySelectorAll('.bin-btn').forEach(b => b.classList.toggle('bin-on', b===btn));
+        exState[name].saved = false;
+      });
+    });
+  } else {
+    card.querySelectorAll('.set-in').forEach(inp => {
+      inp.addEventListener('input', () => {
+        if (!exState[name]) exState[name] = {};
+        exState[name].sets[+inp.dataset.idx] = inp.value;
+        inp.classList.toggle('filled', inp.value !== '');
+        exState[name].saved = false;
+        checkAutoSave(name);
+      });
+    });
+    card.querySelectorAll('.set-ctrl-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (!exState[name]) exState[name] = {};
+        const sets = exState[name].sets;
+        if (btn.dataset.action==='add') {
+          sets.push('');
+        } else {
+          if (sets.length > 1) sets.pop();
+        }
+        exState[name].saved = false;
+        // Re-render just this card
+        const old = document.getElementById('card-'+eid(name));
+        if (old) old.replaceWith(renderExCard(name, null));
+      });
+    });
+  }
 
   if (container) container.appendChild(card);
   return card;
@@ -604,10 +705,12 @@ function toggleCard(name) {
   }
 }
 
-// Auto-save when all 3 sets are filled (only if not yet saved)
+// Auto-save when all default sets are filled (only if not yet saved)
 function checkAutoSave(name) {
   const st = exState[name] || {};
-  if (st.s1 && st.s2 && st.s3 && !st.saved) {
+  const n = defaultSetCount(name);
+  const filled = (st.sets||[]).slice(0,n).every(v=>v&&v.trim());
+  if (filled && !st.saved) {
     clearTimeout(st._autoTimer);
     st._autoTimer = setTimeout(() => {
       if (!exState[name].saved) saveEx(name, true);
@@ -615,42 +718,44 @@ function checkAutoSave(name) {
   }
 }
 
-// maybeAutoSave when switching away: save if unsaved data exists
 function maybeAutoSave(name) {
   const st = exState[name] || {};
-  if (!st.saved && (st.s1 || st.s2 || st.s3)) saveEx(name, true);
+  if (!st.saved && (st.sets||[]).some(v=>v&&v.trim())) saveEx(name, true);
 }
 
 async function saveEx(name, silent=false) {
   const st = exState[name] || {};
-  const s1=(st.s1||'').trim(), s2=(st.s2||'').trim(), s3=(st.s3||'').trim();
-  if (!s1&&!s2&&!s3) { if (!silent) alert('Enter at least one set.'); return; }
+  const sets = (st.sets||[]).map(v=>(v||'').trim());
+  if (!sets.some(Boolean)) { if (!silent) alert('Enter at least one set.'); return; }
 
   setSyncBusy('Saving…');
   const today = new Date().toISOString().slice(0,10);
   const lc = name.toLowerCase();
 
-  // Find existing row for same exercise+day+date in sessionRows
   const existingIdx = sessionRows.findIndex(r =>
     r[1]===today && r[2]===curDay && r[3] && r[3].toLowerCase()===lc
   );
 
+  // Row: [id, date, day, exercise, set1, set2, ..., setN, note]
   const newRow = [
     existingIdx>=0 ? sessionRows[existingIdx][0] : Date.now().toString(),
-    today, curDay, name, s1, s2, s3, st.note||''
+    today, curDay, name,
+    ...sets,
+    st.note||''
   ];
 
+  // Sheet range: A to the column for (4 + sets.length + 1) = sets+note
+  const lastCol = String.fromCharCode(65 + 3 + sets.length); // A=65, cols: A,B,C,D then sets then note
   try {
     if (existingIdx >= 0) {
-      // Overwrite: row index in sheet = existingIdx+2 (1 header + 1-based)
       const sheetRow = existingIdx + 2;
-      await apiUpdate(`sessions!A${sheetRow}:H${sheetRow}`, [newRow]);
+      await apiUpdate(`sessions!A${sheetRow}:${lastCol}${sheetRow}`, [newRow]);
       sessionRows[existingIdx] = newRow;
     } else {
-      await apiAppend('sessions!A:H', [newRow]);
+      await apiAppend(`sessions!A:${lastCol}`, [newRow]);
       sessionRows.push(newRow);
     }
-    exState[name] = {...st, s1, s2, s3, saved:true, _autoTimer:undefined};
+    exState[name] = {...st, sets, saved:true, _autoTimer:undefined};
     setSyncOk('Saved ✓');
     const old = document.getElementById('card-'+eid(name));
     if (old) old.replaceWith(renderExCard(name, null));
@@ -722,7 +827,7 @@ function renderSessions() {
   sessionRows.forEach(r => {
     const key = r[1]+'|'+r[2];
     if (!grouped[key]) grouped[key] = {date:r[1], day:r[2], exercises:[]};
-    grouped[key].exercises.push({name:r[3], sets:[r[4],r[5],r[6]], note:r[7]});
+    grouped[key].exercises.push({name:r[3], sets:rowSets(r), note:rowNote(r)});
   });
   Object.keys(grouped).sort().reverse().forEach(key => {
     const s = grouped[key];
@@ -741,15 +846,79 @@ function renderSessions() {
 
 function showModal(s) {
   modalSess = s;
-  document.getElementById('modal-ttl').textContent = fmtDate(s.date)+' — '+(s.day||'').toUpperCase();
-  document.getElementById('modal-body').innerHTML = s.exercises.map(ex => `
-    <div class="modal-ex-row">
-      <div class="modal-ex-nm">${ex.name}</div>
-      <div class="modal-ex-sets">${ex.sets.filter(Boolean).join(' · ')} kg</div>
-      ${ex.note?`<div class="modal-ex-note">${ex.note}</div>`:''}
-    </div>`).join('');
+  renderModalBody();
   document.getElementById('modal').style.display = 'flex';
 }
+
+function renderModalBody() {
+  const s = modalSess;
+  document.getElementById('modal-ttl').textContent = fmtDate(s.date)+' — '+(s.day||'').toUpperCase();
+  const body = document.getElementById('modal-body');
+  body.innerHTML = '';
+  s.exercises.forEach((ex, i) => {
+    const row = document.createElement('div');
+    row.className = 'modal-ex-row';
+    row.style.display = 'flex';
+    row.style.alignItems = 'flex-start';
+    row.style.justifyContent = 'space-between';
+    row.style.gap = '8px';
+    row.innerHTML = `
+      <div style="flex:1;min-width:0">
+        <div class="modal-ex-nm">${ex.name}</div>
+        <div class="modal-ex-sets">${ex.sets.filter(Boolean).join(' · ')}${ex.sets.some(Boolean)?' kg':''}</div>
+        ${ex.note?`<div class="modal-ex-note">${ex.note}</div>`:''}
+      </div>
+      <button class="del-ex-btn" title="Delete this exercise">🗑</button>`;
+    row.querySelector('.del-ex-btn').addEventListener('click', () => deleteExFromSession(i));
+    body.appendChild(row);
+  });
+}
+
+async function deleteExFromSession(exIdx) {
+  const s = modalSess;
+  const ex = s.exercises[exIdx];
+  if (!confirm(`Remove "${ex.name}" from this session?`)) return;
+
+  setSyncBusy('Deleting…');
+  try {
+    // Find all sessionRows matching this session (date+day)
+    const rowsForSession = sessionRows
+      .map((r,i) => ({r,i}))
+      .filter(({r}) => r[1]===s.date && r[2]===s.day && r[3] && r[3].toLowerCase()===ex.name.toLowerCase());
+
+    // Clear each matching row in the sheet
+    for (const {i} of rowsForSession) {
+      await apiClearRow(i);
+    }
+
+    // Remove from sessionRows in memory
+    const toRemove = new Set(rowsForSession.map(x=>x.i));
+    sessionRows = sessionRows.filter((_,i) => !toRemove.has(i));
+
+    // Remove from modalSess
+    s.exercises.splice(exIdx, 1);
+
+    // Clear exState for today if it matches
+    const today = new Date().toISOString().slice(0,10);
+    if (s.date === today) delete exState[ex.name];
+
+    setSyncOk('Deleted ✓');
+
+    if (s.exercises.length === 0) {
+      // Session now empty — close modal, re-render sessions list
+      hideModal();
+      renderSessions();
+      if (curView === 'log') renderLog();
+    } else {
+      renderModalBody();
+      renderSessions();
+      if (curView === 'log') renderLog();
+    }
+  } catch(e) {
+    setSyncErr('Delete failed: '+e.message);
+  }
+}
+
 function hideModal() { document.getElementById('modal').style.display='none'; }
 function closeModalOutside(e) { if(e.target===document.getElementById('modal')) hideModal(); }
 function loadAsTemplate() {
@@ -813,20 +982,20 @@ function getAllEntries(canonicalName) {
     });
   });
 
-  // From saved sessions — s1, s2, s3 are separate columns
+  // From saved sessions — variable number of set columns
   sessionRows.forEach(r => {
     if (!r[3] || r[3].toLowerCase() !== lc) return;
     const d = r[1];
     ensureDate(d);
-    [r[4],r[5],r[6]].forEach((v,i) => {
+    rowSets(r).forEach((v,i) => {
       const p = parseWeights(v||'');
       if (p) {
         byDate[d]['s'+(i+1)] = p.maxKg;
         if (p.isPartial) byDate[d].isPartial = true;
       }
     });
-    if (r[7] && r[7].trim())
-      byDate[d].note = byDate[d].note ? byDate[d].note+'; '+r[7].trim() : r[7].trim();
+    const note = rowNote(r);
+    if (note) byDate[d].note = byDate[d].note ? byDate[d].note+'; '+note : note;
   });
 
   return Object.keys(byDate).sort().map(d => ({date:d, ...byDate[d]}));
