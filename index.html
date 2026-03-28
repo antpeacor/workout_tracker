@@ -510,8 +510,10 @@ async function loadAll() {
   setSyncBusy('Loading…');
   try {
     const [rs, l1, l2, l3] = await Promise.all([
-      apiGet('sessions!A:P'),
-      apiGet('d1!A:A'), apiGet('d2!A:A'), apiGet('d3!A:A'),
+      apiGet('sessions!A:P').catch(e => { throw new Error('sessions: '+e.message); }),
+      apiGet('d1!A:A').catch(e => { throw new Error('d1: '+e.message); }),
+      apiGet('d2!A:A').catch(e => { throw new Error('d2: '+e.message); }),
+      apiGet('d3!A:A').catch(e => { throw new Error('d3: '+e.message); }),
     ]);
     sessionRows = rs.slice(1).map((r, i) => {
       if (!r || !r[0] || !r[3]) return null;
