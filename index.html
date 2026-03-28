@@ -734,6 +734,8 @@ async function deleteExFromDay(name) {
     setSyncErr('Remove failed: '+e.message);
   }
 }
+
+function toggleCard(name) {
   // Save previous open card if it has data
   if (openCard && openCard !== name) {
     maybeAutoSave(openCard);
