@@ -160,6 +160,8 @@ header{display:flex;align-items:center;justify-content:space-between;padding:18p
 .load-btn{width:100%;margin-top:16px;padding:12px;border:1px solid var(--ac);background:var(--ac2);color:var(--ac);font-family:var(--sans);font-size:14px;font-weight:700;border-radius:8px;cursor:pointer}
 .del-ex-btn{background:none;border:none;color:var(--t3);cursor:pointer;font-size:15px;padding:4px;flex-shrink:0;line-height:1;margin-top:2px}
 .del-ex-btn:hover{color:#f56b8b}
+.edit-ex-btn{background:none;border:none;color:var(--t3);cursor:pointer;font-size:15px;padding:4px;flex-shrink:0;line-height:1;margin-top:2px}
+.edit-ex-btn:hover{color:var(--ac)}
 
 /* GRAPH */
 .search-in{width:100%;padding:10px 14px;font-family:var(--mono);font-size:13px;background:var(--s1);border:1px solid var(--b1);border-radius:var(--r);color:var(--t1);margin-bottom:12px}
@@ -277,7 +279,21 @@ header{display:flex;align-items:center;justify-content:space-between;padding:18p
       <button class="close-btn" onclick="hideModal()">×</button>
     </div>
     <div id="modal-body"></div>
-    <button class="load-btn" onclick="loadAsTemplate()">Use as template ↗</button>
+    <!-- EDIT PANEL (hidden until pencil clicked) -->
+    <div id="edit-panel" style="display:none;border-top:1px solid var(--b1);margin-top:12px;padding-top:14px">
+      <div style="font-family:var(--sans);font-size:13px;font-weight:700;margin-bottom:10px" id="edit-panel-title"></div>
+      <div class="sets-g" id="edit-sets-grid"></div>
+      <div style="display:flex;gap:6px;margin-bottom:10px">
+        <button class="set-ctrl-btn" onclick="editAddSet()">+ set</button>
+        <button class="set-ctrl-btn" onclick="editRemoveSet()">− set</button>
+      </div>
+      <textarea class="set-note" rows="1" id="edit-note" placeholder="Note (optional)"></textarea>
+      <div style="display:flex;gap:8px;margin-top:4px">
+        <button class="save-btn" onclick="saveEditedEx()">Save ✓</button>
+        <button onclick="cancelEdit()" style="padding:10px 14px;border:1px solid var(--b2);background:none;color:var(--t2);font-family:var(--mono);font-size:12px;border-radius:8px;cursor:pointer">Cancel</button>
+      </div>
+    </div>
+    <button class="load-btn" id="modal-tmpl-btn" onclick="loadAsTemplate()">Use as template ↗</button>
   </div>
 </div>
 
@@ -936,7 +952,11 @@ function renderModalBody() {
         <div class="modal-ex-sets">${ex.sets.filter(Boolean).join(' · ')}${ex.sets.some(Boolean)?' kg':''}</div>
         ${ex.note?`<div class="modal-ex-note">${ex.note}</div>`:''}
       </div>
-      <button class="del-ex-btn" title="Delete this exercise">🗑</button>`;
+      <div style="display:flex;gap:2px;flex-shrink:0">
+        <button class="edit-ex-btn" title="Edit">✏️</button>
+        <button class="del-ex-btn" title="Delete">🗑</button>
+      </div>`;
+    row.querySelector('.edit-ex-btn').addEventListener('click', () => openEditPanel(i));
     row.querySelector('.del-ex-btn').addEventListener('click', () => deleteExFromSession(i));
     body.appendChild(row);
   });
@@ -981,8 +1001,98 @@ async function deleteExFromSession(exIdx) {
   }
 }
 
-function hideModal() { document.getElementById('modal').style.display='none'; }
+function hideModal() { document.getElementById('modal').style.display='none'; cancelEdit(); }
 function closeModalOutside(e) { if(e.target===document.getElementById('modal')) hideModal(); }
+
+// ── EDIT PANEL ────────────────────────────────────────────────────────────────
+let editExIdx = null;   // index into modalSess.exercises
+let editSets  = [];     // current set values being edited
+
+function openEditPanel(exIdx) {
+  editExIdx = exIdx;
+  const ex = modalSess.exercises[exIdx];
+  editSets = ex.sets.length ? [...ex.sets] : ['','',''];
+  document.getElementById('edit-panel-title').textContent = 'Editing: ' + ex.name;
+  document.getElementById('edit-note').value = ex.note || '';
+  document.getElementById('edit-panel').style.display = 'block';
+  document.getElementById('modal-tmpl-btn').style.display = 'none';
+  renderEditSets();
+  // Scroll edit panel into view
+  document.getElementById('edit-panel').scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+function cancelEdit() {
+  editExIdx = null; editSets = [];
+  const p = document.getElementById('edit-panel');
+  if (p) p.style.display = 'none';
+  const b = document.getElementById('modal-tmpl-btn');
+  if (b) b.style.display = 'block';
+}
+
+function renderEditSets() {
+  const grid = document.getElementById('edit-sets-grid');
+  grid.innerHTML = editSets.map((v,i) => `
+    <div class="set-wrap">
+      <div class="set-n">Set ${i+1}</div>
+      <input class="set-in${v?' filled':''}" type="text" value="${esc(v)}"
+        placeholder="—" data-idx="${i}" id="edit-set-${i}">
+    </div>`).join('');
+  grid.querySelectorAll('.set-in').forEach(inp => {
+    inp.addEventListener('input', () => {
+      editSets[+inp.dataset.idx] = inp.value;
+      inp.classList.toggle('filled', inp.value !== '');
+    });
+  });
+}
+
+function editAddSet()    { editSets.push(''); renderEditSets(); }
+function editRemoveSet() { if (editSets.length > 1) { editSets.pop(); renderEditSets(); } }
+
+async function saveEditedEx() {
+  if (editExIdx === null) return;
+  const s = modalSess;
+  const ex = s.exercises[editExIdx];
+  const sets = editSets.map(v=>(v||'').trim());
+  if (!sets.some(Boolean)) { alert('Enter at least one set.'); return; }
+  const note = document.getElementById('edit-note').value.trim();
+
+  setSyncBusy('Saving…');
+  const lc = ex.name.toLowerCase();
+
+  // Find the matching sessionRow(s)
+  const matchingRows = sessionRows
+    .map((r,i) => ({r,i}))
+    .filter(({r}) => r[1]===s.date && (!ex.day||r[2]===ex.day) && r[3] && r[3].toLowerCase()===lc);
+
+  if (!matchingRows.length) { setSyncErr('Row not found'); return; }
+
+  try {
+    const {r, i: rowIdx} = matchingRows[0];
+    const lastCol = String.fromCharCode(65 + 3 + sets.length);
+    const newRow = [r[0], r[1], r[2], r[3], ...sets, note];
+    const sheetRow = rowIdx + 2;
+    await apiUpdate(`sessions!A${sheetRow}:${lastCol}${sheetRow}`, [newRow]);
+    sessionRows[rowIdx] = newRow;
+
+    // Update in-memory modalSess
+    ex.sets = sets;
+    ex.note = note;
+
+    // Update exState if today
+    const today = new Date().toISOString().slice(0,10);
+    if (s.date === today && exState[ex.name]) {
+      exState[ex.name] = {...exState[ex.name], sets, note, saved:true};
+    }
+
+    setSyncOk('Saved ✓');
+    cancelEdit();
+    renderModalBody();
+    renderSessions();
+    if (curView === 'log') renderLog();
+  } catch(e) {
+    setSyncErr('Save failed: '+e.message);
+  }
+}
 function loadAsTemplate() {
   if (!modalSess) return;
   template = {day:modalSess.day, sets:{}};
