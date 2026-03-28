@@ -179,7 +179,7 @@ header{display:flex;align-items:center;justify-content:space-between;padding:18p
 .heatmap-table{border-collapse:collapse;width:100%;min-width:320px}
 .heatmap-table th{font-size:10px;color:var(--t3);font-weight:400;padding:2px 4px;text-align:center;white-space:nowrap}
 .heatmap-table td.muscle-lbl{font-size:11px;color:var(--t2);padding:3px 8px 3px 0;white-space:nowrap;text-align:left}
-.heatmap-table td.hm-cell{width:36px;height:24px;border-radius:4px;text-align:center;font-size:10px;font-family:var(--mono);transition:background .3s}
+.heatmap-table td.hm-cell{width:36px;height:28px;border-radius:6px;text-align:center;font-size:9px;font-family:var(--mono);transition:background .3s;padding:0 2px}
 .hm-legend{display:flex;align-items:center;gap:8px;margin-top:12px;font-size:10px;color:var(--t3)}
 .hm-legend-bar{display:flex;gap:2px}
 .hm-legend-cell{width:16px;height:10px;border-radius:2px}
@@ -1607,29 +1607,26 @@ function renderMuscleHeatmap() {
     return;
   }
 
-  // Build weekly data: last 8 weeks
-  // Week key = Monday's date (ISO)
+  // Build weekly data
   function weekKey(dateStr) {
     const d = new Date(dateStr + 'T12:00:00');
-    const day = d.getDay(); // 0=Sun
+    const day = d.getDay();
     const diff = (day === 0 ? -6 : 1) - day;
     const mon = new Date(d);
     mon.setDate(d.getDate() + diff);
     return mon.toISOString().slice(0,10);
   }
 
-  // Collect all weeks with sessions
   const weekSet = new Set();
   sessionRows.forEach(r => { if (r[1]) weekSet.add(weekKey(r[1])); });
-  const weeks = [...weekSet].sort().slice(-8); // last 8 weeks
+  // Most recent first
+  const weeks = [...weekSet].sort().reverse().slice(0, 8);
 
   if (!weeks.length) {
     c.innerHTML = '<div class="empty-state">No sessions yet.</div>';
     return;
   }
 
-  // For each week, compute stimulus per muscle group
-  // weekData[weekKey][groupIdx] = total stimulus (sum of scores from completed exercises)
   const weekData = {};
   weeks.forEach(w => { weekData[w] = new Array(muscleGroups.length).fill(0); });
 
@@ -1641,65 +1638,138 @@ function renderMuscleHeatmap() {
     m.scores.forEach((s,i) => { weekData[wk][i] += s; });
   });
 
-  // Find global max for colour scaling
-  const allVals = weeks.flatMap(w => weekData[w]);
-  const globalMax = Math.max(...allVals, 1);
+  // Per-group max for independent colour scaling
+  const groupMax = muscleGroups.map((_,gi) =>
+    Math.max(...weeks.map(w => weekData[w][gi]), 1)
+  );
 
-  // Colour: 0 = dark, max = bright lime
-  function hmColor(val) {
+  // Colour: per group, from transparent/dark to the group's recap colour
+  // Parse MUSCLE_COLORS hex to RGB for interpolation
+  function hexToRgb(hex) {
+    const r = parseInt(hex.slice(1,3),16);
+    const g = parseInt(hex.slice(3,5),16);
+    const b = parseInt(hex.slice(5,7),16);
+    return [r,g,b];
+  }
+  // Background colors for each group (from MUSCLE_COLORS)
+  const groupColors = muscleGroups.map((_,i) => {
+    const hex = MUSCLE_COLORS[i % MUSCLE_COLORS.length];
+    return hexToRgb(hex);
+  });
+
+  function cellBg(gi, val) {
     if (val === 0) return 'var(--s2)';
-    const intensity = Math.min(1, val / globalMax);
-    // Interpolate from #1a2a0a (very dark green) to #c5f135 (lime)
-    const r = Math.round(26 + intensity * (197-26));
-    const g = Math.round(42 + intensity * (241-42));
-    const b = Math.round(10 + intensity * (53-10));
-    return `rgb(${r},${g},${b})`;
+    const intensity = Math.min(1, val / groupMax[gi]);
+    const [r,g,b] = groupColors[gi];
+    // Fade from near-black (intensity=0) to full colour (intensity=1)
+    const ri = Math.round(20 + intensity * (r - 20));
+    const gi2 = Math.round(20 + intensity * (g - 20));
+    const bi = Math.round(20 + intensity * (b - 20));
+    return `rgb(${ri},${gi2},${bi})`;
   }
 
-  function hmTextColor(val) {
-    const intensity = Math.min(1, val / globalMax);
-    return intensity > 0.5 ? '#111' : 'var(--t3)';
+  function cellText(gi, val) {
+    const intensity = val / groupMax[gi];
+    return intensity > 0.45 ? '#111' : 'rgba(255,255,255,0.35)';
   }
 
-  // Format week label
   function fmtWeek(iso) {
     const d = new Date(iso + 'T12:00:00');
     return d.toLocaleDateString('fr-FR', {day:'numeric', month:'short'});
   }
 
-  // Build table
-  const thead = `<tr><th style="text-align:left;padding-right:8px">Group</th>${weeks.map(w=>`<th>${fmtWeek(w)}</th>`).join('')}</tr>`;
+  // Layout: rows = muscle groups, columns = weeks (most recent left)
+  // Each cell shows a filled bar — no number, just colour intensity + tooltip
+  const colW = Math.max(32, Math.floor(280 / weeks.length));
+
+  const thead = `<tr>
+    <th style="text-align:left;min-width:90px;padding-right:6px;font-size:10px;color:var(--t3);font-weight:400">Group</th>
+    ${weeks.map((w,i) => `<th style="font-size:10px;color:${i===0?'var(--t1)':'var(--t3)'};font-weight:${i===0?700:400};width:${colW}px;padding:2px 2px 6px">${i===0?'This week':fmtWeek(w)}</th>`).join('')}
+  </tr>`;
+
   const tbody = muscleGroups.map((g,gi) => {
-    const cells = weeks.map(w => {
+    const [cr,cg,cb] = groupColors[gi];
+    const labelColor = `rgb(${cr},${cg},${cb})`;
+    const cells = weeks.map((w,wi) => {
       const val = Math.round(weekData[w][gi]);
-      const bg = hmColor(val);
-      const tc = hmTextColor(val);
-      const display = val > 0 ? val : '';
-      return `<td class="hm-cell" style="background:${bg};color:${tc}">${display}</td>`;
+      const bg = cellBg(gi, val);
+      const tc = cellText(gi, val);
+      const pct = val > 0 ? Math.round(val/groupMax[gi]*100) : 0;
+      // Show % only if > 0
+      const label = pct > 0 ? pct+'%' : '';
+      return `<td class="hm-cell" title="${g}: ${val}" style="background:${bg};color:${tc};font-size:9px">${label}</td>`;
     }).join('');
-    return `<tr><td class="muscle-lbl">${g}</td>${cells}</tr>`;
+    return `<tr>
+      <td class="muscle-lbl" style="color:${labelColor};font-size:11px;font-weight:500">${g}</td>
+      ${cells}
+    </tr>`;
   }).join('');
 
-  // Legend
-  const legendCells = [0, 0.2, 0.4, 0.6, 0.8, 1.0].map(v =>
-    `<div class="hm-legend-cell" style="background:${hmColor(v * globalMax)}"></div>`
-  ).join('');
+  // ── THIS WEEK TARGET ─────────────────────────────────────────────────────────
+  // Compare this week to mean of previous weeks (excluding this week)
+  const thisWeek = weeks[0]; // most recent
+  const prevWeeks = weeks.slice(1);
+
+  let targetHTML = '';
+  if (prevWeeks.length >= 1) {
+    // Compute mean per group across previous weeks
+    const prevMean = muscleGroups.map((_,gi) => {
+      const vals = prevWeeks.map(w => weekData[w][gi]).filter(v => v > 0);
+      return vals.length ? Math.round(vals.reduce((a,b)=>a+b,0) / vals.length) : 0;
+    });
+
+    const thisVals = muscleGroups.map((_,gi) => weekData[thisWeek][gi]);
+
+    // Find groups that are below their mean (only if mean > 0)
+    const gaps = muscleGroups
+      .map((g,gi) => ({
+        group: g,
+        gi,
+        thisVal: thisVals[gi],
+        mean: prevMean[gi],
+        gap: prevMean[gi] - thisVals[gi],
+      }))
+      .filter(x => x.mean > 0 && x.gap > 0)
+      .sort((a,b) => (b.gap/b.mean) - (a.gap/a.mean)); // sort by % deficit
+
+    if (gaps.length === 0) {
+      targetHTML = `<div style="font-size:12px;color:var(--t2);padding:4px 0">✓ All groups on track this week</div>`;
+    } else {
+      targetHTML = gaps.map(x => {
+        const pct = Math.round(x.gap / x.mean * 100);
+        const [cr,cg,cb] = groupColors[x.gi];
+        const col = `rgb(${cr},${cg},${cb})`;
+        // Short label showing deficit
+        return `
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+            <div style="width:90px;font-size:12px;font-weight:500;color:${col};flex-shrink:0">${x.group}</div>
+            <div style="flex:1;height:6px;background:var(--s2);border-radius:3px;overflow:hidden">
+              <div style="height:6px;border-radius:3px;background:${col};opacity:0.35;width:100%"></div>
+              <div style="height:6px;border-radius:3px;background:${col};margin-top:-6px;width:${Math.round(x.thisVal/x.mean*100)}%"></div>
+            </div>
+            <div style="font-size:11px;font-family:var(--mono);color:var(--t3);width:48px;text-align:right;flex-shrink:0">−${pct}%</div>
+          </div>`;
+      }).join('');
+    }
+  }
+
+  const targetSection = prevWeeks.length >= 1 ? `
+    <div style="border-top:1px solid var(--b1);margin-top:14px;padding-top:14px">
+      <div style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px">This week vs your average</div>
+      ${targetHTML}
+    </div>` : '';
 
   c.innerHTML = `
     <div class="heatmap-card">
-      <div class="heatmap-ttl">Muscle stimulus — last ${weeks.length} weeks</div>
-      <div class="heatmap-sub">Score = sum of weighted stimulus per group · darker = less work</div>
-      <div style="overflow-x:auto">
+      <div class="heatmap-ttl">Muscle stimulus</div>
+      <div class="heatmap-sub">Last ${weeks.length} weeks · colour = intensity relative to your best week per group</div>
+      <div style="overflow-x:auto;margin-top:10px">
         <table class="heatmap-table">
           <thead>${thead}</thead>
           <tbody>${tbody}</tbody>
         </table>
       </div>
-      <div class="hm-legend">
-        <span>Low</span>
-        <div class="hm-legend-bar">${legendCells}</div>
-        <span>High</span>
-      </div>
+      ${targetSection}
     </div>`;
 }
 
