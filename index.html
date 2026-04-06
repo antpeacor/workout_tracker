@@ -1885,31 +1885,10 @@ function defaultReps(exName) {
 //   "done"         → 0
 function parseSetLoad(raw, defaultR) {
   if (!raw || raw === 'done' || !raw.trim()) return 0;
-  const s = raw.trim();
-
-  // Check for "X(Y at Z)" pattern: Y reps at X, then (defaultR-Y) reps at Z... 
-  // Actually: "20(6 at 25)" = 6 reps at 20kg, 6 reps at 25kg
-  const atMatch = s.match(/^([\d.]+)\((\d+)\s+at\s+([\d.]+)\)$/i);
-  if (atMatch) {
-    const w1 = parseFloat(atMatch[1]);
-    const r1 = parseInt(atMatch[2]);
-    const w2 = parseFloat(atMatch[3]);
-    const r2 = defaultR - r1; // remaining reps at w2
-    return r1 * w1 + Math.max(0, r2) * w2;
-  }
-
-  // Check for "X(Y+Z)" pattern: Y+Z reps at X (still same weight, just split)
-  const splitMatch = s.match(/^([\d.]+)\((\d+)\+(\d+)\)$/);
-  if (splitMatch) {
-    const w = parseFloat(splitMatch[1]);
-    const reps = parseInt(splitMatch[2]) + parseInt(splitMatch[3]);
-    return reps * w;
-  }
-
-  // Plain number: "130" → defaultR × 130
-  const plain = parseFloat(s.replace(/[^\d.]/g,''));
-  if (!isNaN(plain) && plain > 0) return defaultR * plain;
-
+  // Take only the number before any bracket (or the whole string if no bracket)
+  const s = raw.trim().split('(')[0].trim();
+  const w = parseFloat(s);
+  if (!isNaN(w) && w > 0) return w * defaultR;
   return 0;
 }
 
