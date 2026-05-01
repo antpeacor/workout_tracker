@@ -2509,26 +2509,31 @@ function renderRunHeatmap() {
   const c = document.getElementById('run-heatmap');
   if (!c) return;
 
-  // Build week list: past weeks with data + 8 future weeks from today
   const todayMon = weekMonday(new Date().toISOString().slice(0,10));
 
-  // All weeks with actual runs
+  // Collect all relevant week Mondays into a Set (all strings normalised via weekMonday)
   const runWeekSet = new Set();
+
+  // From actual runs
   runRows.forEach(r => { if (r.date) runWeekSet.add(weekMonday(r.date)); });
 
-  // Add 8 weeks from today (including this week)
-  for (let i=0; i<8; i++) {
+  // From plan — normalise through weekMonday to avoid any format differences
+  runWeeks.forEach(w => { if (w.week_start) runWeekSet.add(weekMonday(w.week_start)); });
+
+  // Always include today's week
+  runWeekSet.add(todayMon);
+
+  // Add 8 future weeks
+  for (let i=1; i<8; i++) {
     const d = new Date(todayMon+'T12:00:00');
     d.setDate(d.getDate() + i*7);
     runWeekSet.add(d.toISOString().slice(0,10));
   }
 
-  // Merge with runWeeks plan weeks
-  runWeeks.forEach(w => runWeekSet.add(w.week_start));
-
-  // Sort all weeks desc, show last 8 past + 8 future
   const allWeeks = [...runWeekSet].sort();
-  const todayIdx = allWeeks.indexOf(todayMon);
+
+  // Show up to 7 past weeks + this week + 7 future = max 15 rows
+  const todayIdx = allWeeks.indexOf(todayMon); // always found since we added it
   const startIdx = Math.max(0, todayIdx - 7);
   const weeks    = allWeeks.slice(startIdx, todayIdx + 8);
 
@@ -2542,9 +2547,9 @@ function renderRunHeatmap() {
     if (weekData[wk]) weekData[wk][r.day||'r1'] += r.km;
   });
 
-  // Plan data per week
+  // Plan data per week — normalise keys
   const planMap = {};
-  runWeeks.forEach(w => { planMap[w.week_start] = w; });
+  runWeeks.forEach(w => { if (w.week_start) planMap[weekMonday(w.week_start)] = w; });
 
   const maxKm = Math.max(...weeks.map(w => {
     const d = weekData[w];
